@@ -122,3 +122,27 @@ class Tokenizer:
         if max_length is not None:
             indices = self.padding(indices, max_length)
         return indices
+
+
+if __name__ == "__main__":
+    corpus = [
+        "The cat sat on the mat.",
+        "I love natural language processing.",
+        "How are you doing today?",
+        "She sells seashells by the seashore.",
+        "Artificial intelligence is transforming the world.",
+        "Can you believe it's already July?",
+        "Let's meet at 5 p.m. in the cafe.",
+        "He didn’t know what to say.",
+        "The weather is nice and sunny.",
+        "Data science combines statistics and programming.",
+        "Despite the heavy rain and traffic, she arrived on time with a smile on her face.",
+    ]
+    tokenizer = Tokenizer()
+    tokenizer.build_vocab(corpus)
+    encoded = tokenizer(
+        "The weather is nice and sunny. This is a test sentence.", max_length=15
+    )
+    decoded = tokenizer.decode(encoded)
+    print("Encoded: ", encoded)
+    print("Decoded: ", decoded)
