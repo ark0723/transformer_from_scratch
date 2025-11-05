@@ -1,0 +1,11 @@
+# virtual environment
+.venv/
+
+# python cache
+__pycache__/    
+
+# python version
+.python-version
+
+
+
