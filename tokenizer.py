@@ -1,5 +1,6 @@
 import re
 import collections
+import numpy as np
 
 
 class Tokenizer:
@@ -18,6 +19,9 @@ class Tokenizer:
         self.vocab_size = len(self.word2idx)
         # Pre-compile the regex pattern for efficiency
         self.regex_pattern = re.compile(r"\b\w+\b")
+        self.pad_token_id = 0
+        self.unk_token_id = 1
+        self.vocab_array = None
 
     def normalize_and_split(self, text: str) -> list[str]:
         """
@@ -59,6 +63,9 @@ class Tokenizer:
                 idx += 1
 
         self.vocab_size = len(self.word2idx)
+        self.vocab_array = np.array(
+            [self.idx2word[i] for i in range(len(self.idx2word))]
+        )
 
     def encode(self, text: str) -> list[int]:
         """
@@ -74,18 +81,23 @@ class Tokenizer:
         tokens = self.normalize_and_split(text)
         return [self.word2idx.get(token, self.word2idx["<unk>"]) for token in tokens]
 
-    def decode(self, indices: list[int]) -> list[str]:
+    def decode(self, indices: list[int] | list[list[int]] | np.ndarray) -> np.ndarray:
         """
-        Converts a list of token indices back into a list of token strings.
-        Unknown indices are mapped to the <unk> token string.
+        Converts token indices back into token strings using NumPy indexing.
+        This supports both single sequences and batches.
 
         Args:
-            indices: A list of token indices.
+            indices: A list of token indices (or a list of lists/NumPy array).
 
         Returns:
-            A list of token strings.
+            A NumPy array of token strings.
         """
-        return [self.idx2word.get(idx, "<unk>") for idx in indices]
+        # 1. Convert list into numpy array if it isn't one already
+        indices_arr = (
+            np.array(indices) if not isinstance(indices, np.ndarray) else indices
+        )
+
+        return self.vocab_array[indices_arr]
 
     def padding(self, indices: list[int], max_length: int) -> list[int]:
         """
@@ -105,23 +117,40 @@ class Tokenizer:
         pad_length = max_length - len(indices)
         return indices + [self.word2idx["<pad>"]] * pad_length
 
-    def __call__(self, text: str, max_length: int | None = None) -> list[int]:
+    def __call__(
+        self, text: str | list[str], max_length: int | None = None
+    ) -> np.ndarray:
         """
-        A callable method to encode text and optionally pad/truncate.
-        This makes the tokenizer object behave like a function.
+        Encodes text and applies padding/truncation using NumPy.
+        This method supports both single strings and lists of strings (batch mode).
 
         Args:
-            text: The input string to tokenize and encode.
-            max_length: If provided, the output list will be padded
-                        or truncated to this length.
+            text: The input string or list of strings to tokenize.
+            max_length: The target length for padding/truncation.
 
         Returns:
-            A list of token indices.
+            A NumPy array of token indices with shape (batch_size, max_length).
         """
-        indices = self.encode(text)
-        if max_length is not None:
-            indices = self.padding(indices, max_length)
-        return indices
+        # 1. Input normalization: if text is a string, convert it to a list to unify processing
+        if isinstance(text, str):
+            text = [text]
+
+        # 2. Encoding: Convert text to integer sequences using list comprehension
+        batch_indices = [self.encode(sentence) for sentence in text]
+        # 3. Padding and Batching: Create an optimized NumPy array
+        batch_size = len(batch_indices)
+
+        # Create a NumPy array filled with padding tokens (0)
+        padded_batch = np.full(
+            (batch_size, max_length), self.pad_token_id, dtype=np.int32
+        )
+
+        for i, indices in enumerate(batch_indices):
+            # compute the truncated length
+            length = min(len(indices), max_length)
+            # Copy the truncated indices to the padded array
+            padded_batch[i, :length] = indices[:length]
+        return padded_batch
 
 
 if __name__ == "__main__":
@@ -140,9 +169,13 @@ if __name__ == "__main__":
     ]
     tokenizer = Tokenizer()
     tokenizer.build_vocab(corpus)
-    encoded = tokenizer(
-        "The weather is nice and sunny. This is a test sentence.", max_length=15
-    )
-    decoded = tokenizer.decode(encoded)
-    print("Encoded: ", encoded)
-    print("Decoded: ", decoded)
+
+    # 1. single encoding test
+    single_output = tokenizer("Deep learning is fun.", max_length=10)
+    print(f"Single Output: {single_output}")
+
+    # 2. batch encoding test
+    batch_input = ["The cat sat on the mat.", "I love natural language processing."]
+    batch_output = tokenizer(batch_input, max_length=6)
+    print(f"Batch Output: {batch_output}")
+    print(f"Batch Decoded: {tokenizer.decode(batch_output)}")
