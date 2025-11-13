@@ -99,27 +99,9 @@ class Tokenizer:
 
         return self.vocab_array[indices_arr]
 
-    def padding(self, indices: list[int], max_length: int) -> list[int]:
-        """
-        Pads or truncates a list of indices to a specific max_length.
-
-        Args:
-            indices: The list of token indices.
-            max_length: The target length.
-
-        Returns:
-            A new list of indices with the specified max_length.
-        """
-        # 1. Truncation: if len(indices) > max_length, cut it down.
-        indices = indices[:max_length]
-
-        # 2. Padding: if len(indices) < max_length, fill with <pad> tokens.
-        pad_length = max_length - len(indices)
-        return indices + [self.word2idx["<pad>"]] * pad_length
-
     def __call__(
         self, text: str | list[str], max_length: int | None = None
-    ) -> np.ndarray:
+    ) -> dict[str, np.ndarray]:
         """
         Encodes text and applies padding/truncation using NumPy.
         This method supports both single strings and lists of strings (batch mode).
@@ -129,7 +111,9 @@ class Tokenizer:
             max_length: The target length for padding/truncation.
 
         Returns:
-            A NumPy array of token indices with shape (batch_size, max_length).
+            A dictionary containing:
+            - 'input_ids': (batch_size, max_length)
+            - 'attention_mask': (batch_size, max_length) -> 1 for real token, 0 for <pad>
         """
         # 1. Input normalization: if text is a string, convert it to a list to unify processing
         if isinstance(text, str):
@@ -141,16 +125,20 @@ class Tokenizer:
         batch_size = len(batch_indices)
 
         # Create a NumPy array filled with padding tokens (0)
-        padded_batch = np.full(
-            (batch_size, max_length), self.pad_token_id, dtype=np.int32
-        )
+        input_ids = np.full((batch_size, max_length), self.pad_token_id, dtype=np.int32)
+
+        # initialize attention mask filled with 0(pad)
+        attention_mask = np.zeros((batch_size, max_length), dtype=np.int32)
 
         for i, indices in enumerate(batch_indices):
             # compute the truncated length
             length = min(len(indices), max_length)
             # Copy the truncated indices to the padded array
-            padded_batch[i, :length] = indices[:length]
-        return padded_batch
+            input_ids[i, :length] = indices[:length]
+            # 1 for real token, 0 for <pad>
+            attention_mask[i, :length] = 1
+
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
 if __name__ == "__main__":
@@ -172,10 +160,14 @@ if __name__ == "__main__":
 
     # 1. single encoding test
     single_output = tokenizer("Deep learning is fun.", max_length=10)
-    print(f"Single Output: {single_output}")
+    print(
+        f"Single Input IDs: {single_output['input_ids']} / Single Attention Mask: {single_output['attention_mask']}"
+    )
 
     # 2. batch encoding test
     batch_input = ["The cat sat on the mat.", "I love natural language processing."]
     batch_output = tokenizer(batch_input, max_length=6)
-    print(f"Batch Output: {batch_output}")
-    print(f"Batch Decoded: {tokenizer.decode(batch_output)}")
+    print(
+        f"Batch Input IDs: {batch_output['input_ids']} / Batch Attention Mask: {batch_output['attention_mask']}"
+    )
+    print(f"Batch Decoded: {tokenizer.decode(batch_output['input_ids'])}")
