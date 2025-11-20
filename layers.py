@@ -21,7 +21,7 @@ class MultiHeadAttention(nn.Module):
         self.w_v = nn.Linear(in_features=emb_dim, out_features=emb_dim, bias=bias)
         # final context vector
         self.w_o = nn.Linear(in_features=emb_dim, out_features=emb_dim, bias=bias)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor, pad_mask: None | torch.Tensor = None):
         """
@@ -49,7 +49,7 @@ class MultiHeadAttention(nn.Module):
         if pad_mask is not None:
             # input mask shape: (batch_size, seq_len)
             # mask shape change required for broadcasting: (batch_size, 1, 1, seq_len)
-            pad_mask = pad_mask.unsqeeze(1).unsqeeze(2)
+            pad_mask = pad_mask.unsqueeze(1).unsqueeze(2)
             # masked_fill: fill the values in attn_scores where 0 (padding position) with -inf
             attn_scores = attn_scores.masked_fill(pad_mask == 0, float("-inf"))
 
@@ -82,8 +82,9 @@ class PointWiseFeedForward(nn.Module):
     def forward(self, x: torch.Tensor):
         """
         Args:
-            x : embedded tensor (batch_size, seq_len, emb_dim)
+            x : tensor after multi-head attention and layer normalization (batch_size, seq_len, emb_dim)
             Return:
+                ffn_output: output of point wise feed-forward network (batch_size, seq_len, emb_dim)
         """
 
         ffn_output = self.linear1(x)
@@ -154,14 +155,12 @@ class Encoder(nn.Module):
             emb_dim=emb_dim, n_heads=n_heads, bias=bias, dropout=dropout
         )
 
-        self.ffn = PointWiseFeedForward(
-            emb_dim=emb_dim, hidden_dim=hidden_dim, dropout=dropout
-        )
+        self.ffn = PointWiseFeedForward(emb_dim=emb_dim, hidden_dim=hidden_dim)
         # nn.LayerNorm: have two learnabe parameters -> self.norm_attn and self.norm_ffn need to be seperately specified
         # self.norm_attn: for attention  distribution / self.norm_ffn: for FFN distribution
         self.norm_attn = nn.LayerNorm(normalized_shape=emb_dim)
         self.norm_ffn = nn.LayerNorm(normalized_shape=emb_dim)
-        self.dropout = nn.Dropout(dropout=dropout)
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(
         self,
@@ -184,6 +183,10 @@ class Encoder(nn.Module):
         ], f"Invalid mode: {mode}. Must be 'pre-norm' or 'post-norm'."
 
         if mode == "pre-norm":
+            # layer normalization: stabilize the result and pass it to the next layer
+            # -> maximize training stability even with deep layers
+            # dropout: add random noise to the output of the sublayer
+            # residual add: add the noise to the original input
             attn_output = self.attention(self.norm_attn(x), pad_mask=pad_mask)
             attn_output = self.dropout(attn_output)
             x = x + attn_output
@@ -193,6 +196,10 @@ class Encoder(nn.Module):
             x = x + ffn_output
 
         else:  # post-norm
+            # dropout: add random noise to the output of the sublayer
+            # residual add: add the noise to the original input
+            # layer normalization: stabilize the result and pass it to the next layer
+
             attn_output = self.attention(x, pad_mask=pad_mask)
             # apply droput before residual connection and layer normalization
             attn_output = self.dropout(attn_output)
