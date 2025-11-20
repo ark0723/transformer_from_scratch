@@ -7,6 +7,7 @@ from tokenizer import Tokenizer
 from dataloader import TextDataset, DataCollator
 from models import Transformer
 
+from torchinfo import summary
 
 if __name__ == "__main__":
     # ---------------------------------------------------------
@@ -54,6 +55,33 @@ if __name__ == "__main__":
         bias=True,
         dropout=0.1,
     ).to(device)
+
+    # summary function call
+    # 1. extract one batch from DataLoader
+    # convert Data Loader to iterator and get the first data
+    batch_data = next(iter(dataloader))
+
+    # 2. move and slice the data to the device
+    # (batch_size, seq_len)
+    input_ids = batch_data["input_ids"].to(device)
+    attention_mask = batch_data["attention_mask"].to(device)
+
+    # create training input and mask
+    # Shape: (10, 10) -> (10, 9)
+    train_input = input_ids[:, :-1]
+    train_mask = attention_mask[:, :-1]
+
+    # 3. summary 함수 호출
+    print("\n--- Model Summary (Actual Data) ---")
+    summary(
+        model,
+        # tensor input is passed in tuple format to input_data
+        input_data=(train_input, train_mask),
+        kwargs={"mode": "post-norm"},
+        verbose=1,
+        depth=5,
+    )
+    print("-----------------------------------\n")
 
     # ---------------------------------------------------------
     # 3. Optimizer & Loss Function Setting
