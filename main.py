@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 
 from tokenizer import Tokenizer
 from dataloader import TextDataset, DataCollator
-from transformer import Transformer
+from models import Transformer
 
 
 if __name__ == "__main__":
@@ -48,8 +48,10 @@ if __name__ == "__main__":
     model = Transformer(
         vocab_size=tokenizer.vocab_size,
         emb_dim=128,
+        hidden_dim=512,
         n_heads=4,
-        n_layers=1,
+        n_layers=2,
+        bias=True,
         dropout=0.1,
     ).to(device)
 
@@ -84,7 +86,7 @@ if __name__ == "__main__":
             train_mask = attention_mask[:, :-1]
 
             # 1. model forward : (batch_size, seq_len, vocab_size)
-            predictions = model(train_input, mask=train_mask)
+            predictions = model(train_input, pad_mask=train_mask, mode="post-norm")
 
             # 2. loss calculation
             # CrossEntropyLoss takes (N, C) and (N) inputs, so we flatten the dimensions.
