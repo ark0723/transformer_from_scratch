@@ -40,6 +40,7 @@ class Transformer(nn.Module):
         x: torch.Tensor,
         pad_mask: None | torch.Tensor = None,
         mode: str = "post-norm",
+        **kwargs: dict,
     ):
         """
         Args:
