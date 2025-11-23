@@ -78,6 +78,8 @@ if __name__ == "__main__":
         # tensor input is passed in tuple format to input_data
         input_data=(train_input, train_mask),
         kwargs={"mode": "post-norm"},
+        col_names=["input_size", "output_size", "num_params"],
+        row_settings=["var_names"],
         verbose=1,
         depth=5,
     )
