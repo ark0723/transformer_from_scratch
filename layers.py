@@ -23,7 +23,12 @@ class MultiHeadAttention(nn.Module):
         self.w_o = nn.Linear(in_features=emb_dim, out_features=emb_dim, bias=bias)
         self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self, x: torch.Tensor, pad_mask: None | torch.Tensor = None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        pad_mask: torch.Tensor,
+        causal: bool = False,
+    ):
         """
         Args:
             x: embedded tensor (batch_size, seq_len, emb_dim)
@@ -46,12 +51,40 @@ class MultiHeadAttention(nn.Module):
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
         # attention masking
-        if pad_mask is not None:
-            # input mask shape: (batch_size, seq_len)
-            # mask shape change required for broadcasting: (batch_size, 1, 1, seq_len)
-            pad_mask = pad_mask.unsqueeze(1).unsqueeze(2)
-            # masked_fill: fill the values in attn_scores where 0 (padding position) with -inf
-            attn_scores = attn_scores.masked_fill(pad_mask == 0, float("-inf"))
+        # input mask shape: (batch_size, seq_len)
+        # mask shape change required for broadcasting: (batch_size, 1, 1, seq_len)
+        # why (batch_size, 1, 1, seq_len)? -> because we need to broadcast the mask with k(key) axis
+        ####### applied attention masking results example #######
+        ## table -> K1, K2, K3 (padding)
+        ## Q1    -> score, score, -inf
+        ## Q2    -> score, score, -inf
+        ## Q3    -> score, score, -inf
+
+        # if we make mask shape(batch_size, 1, seq_len, 1), the mask will be broadcasted with q(query) axis
+        # and the mask will be applied to the wrong axis
+        # example:
+        # q1 -> K1, K2, K3
+        # q2 -> K1, K2, K3
+        # q3(padding) -> -inf, -inf, -inf
+
+        pad_mask = pad_mask.unsqueeze(1).unsqueeze(2)
+
+        if causal:
+            # attention score shape: (batch_size, n_heads, seq_len, seq_len)
+            # causal mask shape: (1, 1, seq_len, seq_len) for broadcasting with attention scores
+            causal_mask = (
+                torch.tril(torch.ones(seq_len, seq_len, device=x.device))
+                .unsqueeze(0)
+                .unsqueeze(1)
+            )
+            # logical_or: return True if either of the conditions is True
+            # shape: (batch_size, 1, seq_len, seq_len)
+            combined_mask = torch.logical_or(pad_mask == 0, causal_mask == 0)
+        else:
+            # shape: (batch_size, 1, 1, seq_len)
+            combined_mask = pad_mask == 0
+        # at the position where combined_mask is True, fill the attention scores with -inf
+        attn_scores = attn_scores.masked_fill(combined_mask, float("-inf"))
 
         # apply softmax and dropout
         # shape (batch_size, n_heads, seq_len, seq_len)
@@ -152,7 +185,11 @@ class Encoder(nn.Module):
         super().__init__()
 
         self.attention = MultiHeadAttention(
-            emb_dim=emb_dim, n_heads=n_heads, bias=bias, dropout=dropout
+            emb_dim=emb_dim,
+            n_heads=n_heads,
+            bias=bias,
+            dropout=dropout,
+            causal=False,
         )
 
         self.ffn = PointWiseFeedForward(emb_dim=emb_dim, hidden_dim=hidden_dim)
@@ -211,3 +248,7 @@ class Encoder(nn.Module):
             x = self.norm_ffn(x + ffn_output)
 
         return x
+
+
+class Decoder(nn.Module):
+    pass
