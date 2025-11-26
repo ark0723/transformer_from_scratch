@@ -5,8 +5,45 @@ import math
 
 
 class MultiHeadAttention(nn.Module):
+    """
+    Multi-Head Attention Module.
+
+    This module handles both **Self-Attention** and **Cross-Attention** mechanisms.
+
+    ### Understanding Query, Key, and Value (Q, K, V):
+    The core of attention is mapping a Query against a set of Keys to compute scores,
+    which are then used to weight the Values.
+
+    1. **Self-Attention (Encoder & Decoder):**
+       - **Source:** The input tensor `x` itself.
+       - **Mechanism:** $Q, K, V$ are all derived from `x`.
+       - **Concept:** "How much does this token (Query) relate to other tokens in the same sentence (Keys)?"
+
+    2. **Cross-Attention (Decoder-only):**
+       - **Source:** - **Query ($Q$):** Comes from the Decoder's input `x` (the target sentence generated so far).
+         - **Key ($K$) & Value ($V$):** Come from the Encoder's output `context` (the full source sentence).
+       - **Mechanism:** $Q$ comes from `x`, while $K, V$ come from `context`.
+       - **Concept:** "How much does the current token I'm generating (Query) relate to the input source sentence tokens (Keys)?"
+
+    Args:
+        emb_dim (int): Dimensionality of the input embeddings.
+        n_heads (int): Number of attention heads.
+        bias (bool): Whether to add bias to the linear projections.
+        dropout (float): Dropout probability.
+        is_cross_attn (bool): If True, performs Cross-Attention. If False, performs Self-Attention.
+        is_causal (bool): If True, applies a causal mask (masked self-attention) to prevent attending to future tokens.
+        max_seq_len (int): Maximum sequence length for pre-registering the causal mask buffer.
+    """
+
     def __init__(
-        self, emb_dim: int, n_heads: int, bias: bool = True, dropout: float = 0.1
+        self,
+        emb_dim: int,
+        n_heads: int,
+        bias: bool = True,
+        dropout: float = 0.1,
+        is_cross_attn: bool = False,
+        is_causal: bool = False,
+        max_seq_len: int = 5000,
     ):
         super().__init__()
 
@@ -14,47 +51,126 @@ class MultiHeadAttention(nn.Module):
 
         self.head_dim = emb_dim // n_heads
         self.n_heads = n_heads
+        self.is_cross_attn = is_cross_attn
+        self.is_causal = is_causal
+        self.max_seq_len = max_seq_len
 
-        # w_q, w_k, w_v initialization
+        # Initialization of projection layers for Q, K, V
         self.w_q = nn.Linear(in_features=emb_dim, out_features=emb_dim, bias=bias)
         self.w_k = nn.Linear(in_features=emb_dim, out_features=emb_dim, bias=bias)
         self.w_v = nn.Linear(in_features=emb_dim, out_features=emb_dim, bias=bias)
+
         # final context vector
         self.w_o = nn.Linear(in_features=emb_dim, out_features=emb_dim, bias=bias)
         self.dropout = nn.Dropout(p=dropout)
 
+        # Register causal mask buffer only if it is Self-Attention and Causal mode is enabled.
+        # This improves memory efficiency by avoiding re-creation of the mask at every forward pass.
+        if not is_cross_attn and is_causal:
+            # shape: (1, 1, max_seq_len, max_seq_len)
+            causal_mask = (
+                torch.tril(torch.ones(max_seq_len, max_seq_len))
+                .unsqueeze(0)
+                .unsqueeze(1)
+            )
+            # register_buffer saves this tensor to the state_dict but does not update it during backprop.
+            self.register_buffer("causal_mask", causal_mask)
+
     def forward(
         self,
         x: torch.Tensor,
-        pad_mask: torch.Tensor,
-        causal: bool = False,
+        context: torch.Tensor | None = None,
+        key_pad_mask: torch.Tensor | None = None,
     ):
         """
+        Forward pass for Multi-Head Attention.
+
         Args:
-            x: embedded tensor (batch_size, seq_len, emb_dim)
-            pad_mask: padding mask (batch_size, seq_len)
-        Return:
-            context vector (batch_size, seq_len, emb_dim)
+            x (torch.Tensor): Input tensor acting as the Query source.
+                Shape: (batch_size, seq_len_q, emb_dim)
+            context (torch.Tensor | None): Context tensor acting as Key/Value source (from Encoder).
+                Required only for Cross-Attention.
+                Shape: (batch_size, seq_len_k, emb_dim)
+            key_pad_mask (torch.Tensor | None): Mask to ignore padding tokens in Keys.
+                Shape: (batch_size, seq_len_k)
+                Values: 1 for valid tokens, 0 for padding (to be masked).
+
+        Returns:
+            torch.Tensor: Context vector (output of attention).
+                Shape: (batch_size, seq_len_q, emb_dim)
         """
-        batch_size, seq_len, emb_dim = x.size()
-        # 1. Q, K, V computation : shape (batch_size, seq_len, emb_dim)
+        batch_size, seq_len_q, emb_dim = x.size()
+
+        # ----------------------------------------------------------------------
+        # 1. Compute Q, K, V
+        # ----------------------------------------------------------------------
+
+        # Query (Q) always comes from 'x'.
+        # In Decoder: 'x' is the target sequence.
+        # In Encoder: 'x' is the source sequence.
         q = self.w_q(x)
-        k = self.w_k(x)
-        v = self.w_v(x)
 
-        # 2. Q, K, V split by heads: shape (batch_size, n_heads, seq_len, head_dim)
-        q = q.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        # Determine source for Key (K) and Value (V)
+        if self.is_cross_attn:
+            assert (
+                self.is_causal == False
+            ), "Causal attention is not allowed in cross attention."
+            assert (
+                context is not None
+            ), "Context (Encoder output) is required for Cross-Attention."
 
-        # 3. Attention Scores computation: shape (batch_size, n_heads, seq_len, seq_len)
+            # Cross-Attention: K and V come from the Encoder output (context).
+            k = self.w_k(context)
+            v = self.w_v(context)
+            # Cross Attn에서는 seq_len이 source(encoder)의 길이임
+            # 따라서 split 할 때 view의 차원을 context 의 seq_len_k 기준으로 맞춰야 함
+            seq_len_k = context.size(1)
+        else:
+            # Self-Attention: K and V come from 'x' (same as Q).
+            k = self.w_k(x)
+            v = self.w_v(x)
+            seq_len_k = seq_len_q
+
+        # ----------------------------------------------------------------------
+        # 2. Split Heads & Reshape (for Multi-Head Attention)
+        # ----------------------------------------------------------------------
+        # Shape: (batch_size, n_heads, seq_len, head_dim)
+        q = q.view(batch_size, seq_len_q, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len_k, self.n_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len_k, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # ----------------------------------------------------------------------
+        # 3. Compute Attention Scores
+        # ----------------------------------------------------------------------
+        # Shape: (batch_size, n_heads, seq_len_q, seq_len_k)
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
-        # attention masking
-        # input mask shape: (batch_size, seq_len)
-        # mask shape change required for broadcasting: (batch_size, 1, 1, seq_len)
-        # why (batch_size, 1, 1, seq_len)? -> because we need to broadcast the mask with k(key) axis
-        ####### applied attention masking results example #######
+        # ----------------------------------------------------------------------
+        # 4. Apply Masking
+        # ----------------------------------------------------------------------
+
+        # A. Causal Masking (Look-ahead Mask)
+        # Applied only for Decoder Self-Attention (is_causal=True).
+        if self.is_causal:
+            # Retrieve pre-calculated mask from buffer and slice it to current sequence length.
+            if seq_len_q > self.max_seq_len:
+                mask = (
+                    torch.tril(torch.ones(seq_len_q, seq_len_q, device=x.device))
+                    .unsqueeze(0)
+                    .unsqueeze(1)
+                )
+            else:
+                mask = self.causal_mask[:, :, :seq_len_q, :seq_len_q]
+
+            # Mask future tokens with -inf (where mask is 0)
+            attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
+
+        # B. Padding Masking (Key Padding Mask)
+        # Why (batch_size, 1, 1, seq_len_k)?
+        # We need to broadcast the mask along the Query axis (dim 2) and Head axis (dim 1).
+        # The mask effectively says: "For ANY Query token, do not attend to THESE Key tokens (padding)."
+        #
+        # [Example Broadcasting]
         ## table -> K1, K2, K3 (padding)
         ## Q1    -> score, score, -inf
         ## Q2    -> score, score, -inf
@@ -67,39 +183,45 @@ class MultiHeadAttention(nn.Module):
         # q2 -> K1, K2, K3
         # q3(padding) -> -inf, -inf, -inf
 
-        pad_mask = pad_mask.unsqueeze(1).unsqueeze(2)
+        if key_pad_mask is not None:
+            assert key_pad_mask.dim() == 2, "key_pad_mask must be a 2D tensor."
 
-        if causal:
-            # attention score shape: (batch_size, n_heads, seq_len, seq_len)
-            # causal mask shape: (1, 1, seq_len, seq_len) for broadcasting with attention scores
-            causal_mask = (
-                torch.tril(torch.ones(seq_len, seq_len, device=x.device))
-                .unsqueeze(0)
-                .unsqueeze(1)
-            )
-            # logical_or: return True if either of the conditions is True
-            # shape: (batch_size, 1, seq_len, seq_len)
-            combined_mask = torch.logical_or(pad_mask == 0, causal_mask == 0)
-        else:
-            # shape: (batch_size, 1, 1, seq_len)
-            combined_mask = pad_mask == 0
-        # at the position where combined_mask is True, fill the attention scores with -inf
-        attn_scores = attn_scores.masked_fill(combined_mask, float("-inf"))
+            # Validation: Ensure mask length matches the Key/Value length.
+            if self.is_cross_attn:
+                assert (
+                    key_pad_mask.size(1) == seq_len_k
+                ), f"Cross Attention: key_pad_mask's sequence length, ({key_pad_mask.size(1)}) must match context vector's sequence length ({seq_len_k})"
+            else:
+                assert (
+                    key_pad_mask.size(1) == seq_len_q
+                ), f"Self Attention: key_pad_mask's sequence length, ({key_pad_mask.size(1)}) must match query vector's sequence length ({seq_len_q})"
 
-        # apply softmax and dropout
-        # shape (batch_size, n_heads, seq_len, seq_len)
+            # Expand for broadcasting: (batch_size, seq_len_k) -> (batch_size, 1, 1, seq_len_k)
+            mask_expanded = key_pad_mask.unsqueeze(1).unsqueeze(2)
+            # Apply mask: 0 indicates padding (ignore), so fill with -inf
+            attn_scores = attn_scores.masked_fill(mask_expanded == 0, float("-inf"))
+
+        # ----------------------------------------------------------------------
+        # 5. Output Computation
+        # ----------------------------------------------------------------------
+
+        # Apply softmax and dropout
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
 
-        # 4. context vector
-        # shape (batch_size, n_heads, seq_len, head_dim)
+        # Weighted sum of Values (V)
+        # Shape: (batch_size, n_heads, seq_len_q, head_dim) -> (batch_size, seq_len_q, emb_dim)
         context_vector_by_heads = torch.matmul(attn_weights, v)
-        # 5. concatenate context vectors by heads : (batch_size, seq_len, emb_dim)
+
+        # Concatenate heads and restore original embedding dimension
+        # Shape: (batch_size, seq_len_q, emb_dim)
         context_vector = (
             context_vector_by_heads.transpose(1, 2)
             .contiguous()
-            .view(batch_size, seq_len, self.n_heads * self.head_dim)
+            .view(batch_size, seq_len_q, self.n_heads * self.head_dim)
         )
+
+        # Final linearprojection
         context_vector = self.w_o(context_vector)
         return context_vector
 
@@ -189,7 +311,8 @@ class Encoder(nn.Module):
             n_heads=n_heads,
             bias=bias,
             dropout=dropout,
-            causal=False,
+            is_cross_attn=False,
+            is_causal=False,
         )
 
         self.ffn = PointWiseFeedForward(emb_dim=emb_dim, hidden_dim=hidden_dim)
@@ -202,7 +325,7 @@ class Encoder(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        pad_mask: None | torch.Tensor = None,
+        key_pad_mask: None | torch.Tensor = None,
         mode: str = "post-norm",
     ):
         """
@@ -224,7 +347,7 @@ class Encoder(nn.Module):
             # -> maximize training stability even with deep layers
             # dropout: add random noise to the output of the sublayer
             # residual add: add the noise to the original input
-            attn_output = self.attention(self.norm_attn(x), pad_mask=pad_mask)
+            attn_output = self.attention(self.norm_attn(x), key_pad_mask=key_pad_mask)
             attn_output = self.dropout(attn_output)
             x = x + attn_output
 
@@ -237,7 +360,7 @@ class Encoder(nn.Module):
             # residual add: add the noise to the original input
             # layer normalization: stabilize the result and pass it to the next layer
 
-            attn_output = self.attention(x, pad_mask=pad_mask)
+            attn_output = self.attention(x, key_pad_mask=key_pad_mask)
             # apply droput before residual connection and layer normalization
             attn_output = self.dropout(attn_output)
             # residual connection(input before multi-head attention + output of multi-head attention) & layer normalization
