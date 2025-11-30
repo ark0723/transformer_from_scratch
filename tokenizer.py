@@ -12,15 +12,21 @@ class Tokenizer:
     def __init__(self):
         """
         Initializes the tokenizer.
-        Sets up special tokens (<pad>, <unk>) and pre-compiles the regex pattern.
+        Sets up special tokens (<pad>, <unk>, <sos>, <eos>) and pre-compiles the regex pattern.
         """
-        self.word2idx = {"<pad>": 0, "<unk>": 1}
-        self.idx2word = {0: "<pad>", 1: "<unk>"}
-        self.vocab_size = len(self.word2idx)
+        self.specials = ["<pad>", "<unk>", "<sos>", "<eos>"]
+        self.word2idx = {word: i for i, word in enumerate(self.specials)}
+        self.idx2word = {i: word for word, i in self.word2idx.items()}
+
+        # IDs are pre-saved for readability and speed improvement
+        self.pad_token_id = self.word2idx["<pad>"]
+        self.unk_token_id = self.word2idx["<unk>"]
+        self.sos_token_id = self.word2idx["<sos>"]
+        self.eos_token_id = self.word2idx["<eos>"]
+
         # Pre-compile the regex pattern for efficiency
         self.regex_pattern = re.compile(r"\b\w+\b")
-        self.pad_token_id = 0
-        self.unk_token_id = 1
+        self.vocab_size = len(self.word2idx)
         self.vocab_array = None
 
     def normalize_and_split(self, text: str) -> list[str]:
@@ -67,7 +73,9 @@ class Tokenizer:
             [self.idx2word[i] for i in range(len(self.idx2word))]
         )
 
-    def encode(self, text: str) -> list[int]:
+    def encode(
+        self, text: str, add_sos: bool = False, add_eos: bool = False
+    ) -> list[int]:
         """
         Converts a text string into a list of token indices.
         Unknown words are mapped to the <unk> token index.
@@ -79,15 +87,26 @@ class Tokenizer:
             A list of token indices.
         """
         tokens = self.normalize_and_split(text)
-        return [self.word2idx.get(token, self.word2idx["<unk>"]) for token in tokens]
+        ids = [self.word2idx.get(token, self.word2idx["<unk>"]) for token in tokens]
 
-    def decode(self, indices: list[int] | list[list[int]] | np.ndarray) -> np.ndarray:
+        if add_sos:
+            ids = [self.sos_token_id] + ids
+        if add_eos:
+            ids = ids + [self.eos_token_id]
+        return ids
+
+    def decode(
+        self,
+        indices: list[int] | list[list[int]] | np.ndarray,
+        skip_special_tokens: bool = False,
+    ) -> np.ndarray:
         """
         Converts token indices back into token strings using NumPy indexing.
         This supports both single sequences and batches.
 
         Args:
             indices: A list of token indices (or a list of lists/NumPy array).
+            skip_special_tokens: If True, removes special tokens from the output.
 
         Returns:
             A NumPy array of token strings.
@@ -96,11 +115,26 @@ class Tokenizer:
         indices_arr = (
             np.array(indices) if not isinstance(indices, np.ndarray) else indices
         )
+        decoded = self.vocab_array[indices_arr]
 
-        return self.vocab_array[indices_arr]
+        if skip_special_tokens:
+            # 3. Vectorized Filtering using np.isin
+            # self.specials에 포함되지 않은(invert=True) 요소만 True인 마스크 생성
+            mask = np.isin(decoded, self.specials, invert=True)
+
+            # 4. 마스크 적용하여 반환
+            # 주의: 입력이 2D(배치)였어도, 필터링 후에는 길이가 제각각이므로
+            # 1D array로 평탄화(flatten) 되어 반환
+            return decoded[mask]
+
+        return decoded
 
     def __call__(
-        self, text: str | list[str], max_length: int | None = None
+        self,
+        text: str | list[str],
+        max_length: int | None = None,
+        add_sos: bool = False,
+        add_eos: bool = False,
     ) -> dict[str, np.ndarray]:
         """
         Encodes text and applies padding/truncation using NumPy.
@@ -120,7 +154,9 @@ class Tokenizer:
             text = [text]
 
         # 2. Encoding: Convert text to integer sequences using list comprehension
-        batch_indices = [self.encode(sentence) for sentence in text]
+        batch_indices = [
+            self.encode(sentence, add_sos=add_sos, add_eos=add_eos) for sentence in text
+        ]
         # 3. Padding and Batching: Create an optimized NumPy array
         batch_size = len(batch_indices)
 
