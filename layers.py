@@ -295,7 +295,7 @@ class PositionalEncoding(nn.Module):
         return embedded
 
 
-class Encoder(nn.Module):
+class EncoderLayer(nn.Module):
     def __init__(
         self,
         emb_dim: int,
@@ -373,5 +373,117 @@ class Encoder(nn.Module):
         return x
 
 
-class Decoder(nn.Module):
-    pass
+class DecoderLayer(nn.Module):
+    """
+    Single Decoder layer for the Transformer model.
+
+    Logic flow: Masked Self-Attention -> Cross-Attention -> Point Wise Feed Forward
+    """
+
+    def __init__(
+        self,
+        emb_dim: int,
+        hidden_dim: int,
+        n_heads: int,
+        bias: bool = True,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+
+        # 1. Masked Self-Attention (Causal)
+        # "지금까지 생성한 단어들끼리 어떤 연관성이 있는가?"를 계산
+        self.causal_attn = MultiHeadAttention(
+            emb_dim=emb_dim,
+            n_heads=n_heads,
+            bias=bias,
+            dropout=dropout,
+            is_cross_attn=False,
+            is_causal=True,  # 중요: Decoder Self-Attention은 미래를 못 봄
+        )
+
+        # 2. Cross-Attention
+        # "내가 지금 번역(생성)하려는 단어가 원문(Source)의 어느 부분과 연관되어 있는가?"
+        self.cross_attn = MultiHeadAttention(
+            emb_dim=emb_dim,
+            n_heads=n_heads,
+            bias=bias,
+            dropout=dropout,
+            is_cross_attn=True,  # 중요: Encoder Output을 참조
+            is_causal=False,
+            max_seq_len=5000,
+        )
+
+        self.ffn = PointWiseFeedForward(emb_dim=emb_dim, hidden_dim=hidden_dim)
+        # nn.LayerNorm: have two learnabe parameters -> self.norm_attn, self.norm_cross_attn, and self.norm_ffn need to be seperately specified
+        # self.norm_attn: for attention  distribution / self.norm_cross_attn: for cross attention distribution / self.norm_ffn: for FFN distribution
+        self.norm_attn = nn.LayerNorm(normalized_shape=emb_dim)
+        self.norm_cross_attn = nn.LayerNorm(normalized_shape=emb_dim)
+        self.norm_ffn = nn.LayerNorm(normalized_shape=emb_dim)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        encoder_output: torch.Tensor,
+        source_pad_mask: None | torch.Tensor = None,
+        target_pad_mask: None | torch.Tensor = None,
+        mode: str = "post-norm",
+    ):
+        """
+        Args:
+            x: Decoder input (batch_size, seq_len_tgt, emb_dim)
+            encoder_output: Encoder output context (batch_size, seq_len_src, emb_dim)
+            source_pad_mask: Padding mask for Encoder (src sequence) -> used in Cross-Attn
+            target_pad_mask: Padding mask for Decoder (tgt sequence) -> used in Self-Attn
+            mode: "pre-norm" or "post-norm"
+        """
+
+        mode = mode.lower()
+
+        assert mode in [
+            "pre-norm",
+            "post-norm",
+        ], f"Invalid mode: {mode}. Must be 'pre-norm' or 'post-norm'."
+
+        if mode == "pre-norm":
+            # Masked Self-Attention: Norm -> Attn -> Residual Add
+            # target_pad_mask 사용 (디코더 입력의 패딩 처리)
+            attn_output = self.causal_attn(
+                self.norm_attn(x), key_pad_mask=target_pad_mask
+            )
+            attn_output = self.dropout(attn_output)
+            x = x + attn_output
+
+            # Cross-Attention: Norm -> Attn -> Residual Add
+            # source_pad_mask 사용 (인코더 출력의 패딩 처리)
+            attn_output = self.cross_attn(
+                self.norm_cross_attn(x),
+                context=encoder_output,
+                key_pad_mask=source_pad_mask,
+            )
+            attn_output = self.dropout(attn_output)
+            x = x + attn_output
+
+            # Point Wise Feed Forward: Norm -> FFN -> Residual Add
+            ffn_output = self.ffn(self.norm_ffn(x))
+            ffn_output = self.dropout(ffn_output)
+            x = x + ffn_output
+
+        else:  # post-norm
+            # Masked Self-Attention
+            attn_output = self.causal_attn(x, key_pad_mask=target_pad_mask)
+            attn_output = self.dropout(attn_output)
+            x = self.norm_attn(x + attn_output)
+            # Cross-Attention
+            attn_output = self.cross_attn(
+                x, context=encoder_output, key_pad_mask=source_pad_mask
+            )
+            attn_output = self.dropout(attn_output)
+            x = self.norm_cross_attn(x + attn_output)
+
+            # Point Wise Feed Forward
+            ffn_output = self.ffn(x)
+            ffn_output = self.dropout(ffn_output)
+            x = self.norm_ffn(x + ffn_output)
+
+        return x
