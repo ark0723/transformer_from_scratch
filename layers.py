@@ -522,7 +522,10 @@ class Encoder(nn.Module):
         """
         Args:
             x: input ids (batch_size, seq_len)
-            pad_mask: padding mask (batch_size, seq_len)
+            key_pad_mask: padding mask (batch_size, seq_len)
+            mode: "pre-norm" or "post-norm"
+        Return:
+            x: encoder output (batch_size, seq_len, emb_dim)
         """
         x = self.embedding(x) * math.sqrt(self.emb_dim)
         x = self.positional_encoding(x)
@@ -573,8 +576,14 @@ class Decoder(nn.Module):
     ):
         """
         Args:
-            x: input ids (batch_size, seq_len)
-            pad_mask: padding mask (batch_size, seq_len)
+            x: input ids (batch_size, decoder_seq_len) - Query
+            encoder_output: encoder output (batch_size, encoder_seq_len, emb_dim) - Key / Value
+            source_pad_mask: padding mask for source input (batch_size, encoder_seq_len)
+            target_pad_mask: padding mask for target input (batch_size, decoder_seq_len)
+            mode: "pre-norm" or "post-norm"
+        Return:
+            why? attention result follows the same shape as the query -> decoder_seq_len
+            x: decoder output (batch_size, decoder_seq_len, emb_dim)
         """
         x = self.embedding(x) * math.sqrt(self.emb_dim)
         x = self.positional_encoding(x)
