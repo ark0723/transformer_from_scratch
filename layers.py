@@ -487,3 +487,103 @@ class DecoderLayer(nn.Module):
             x = self.norm_ffn(x + ffn_output)
 
         return x
+
+
+class Encoder(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        emb_dim: int,
+        hidden_dim: int,
+        n_heads: int,
+        n_layers: int,
+        bias: bool = True,
+        dropout: float = 0.1,
+        max_length: int = 5000,
+    ):
+        super().__init__()
+
+        self.emb_dim = emb_dim
+        self.embedding = nn.Embedding(vocab_size, emb_dim)
+        self.positional_encoding = PositionalEncoding(emb_dim, max_length=max_length)
+        self.dropout = nn.Dropout(p=dropout)
+        self.layers = nn.ModuleList(
+            [
+                EncoderLayer(emb_dim, hidden_dim, n_heads, bias, dropout)
+                for _ in range(n_layers)
+            ]
+        )
+        # pre-norm mode only : final layer normalization
+        self.norm = nn.LayerNorm(normalized_shape=emb_dim)
+
+    def forward(
+        self, x: torch.Tensor, key_pad_mask: torch.Tensor, mode: str = "post-norm"
+    ):
+        """
+        Args:
+            x: input ids (batch_size, seq_len)
+            pad_mask: padding mask (batch_size, seq_len)
+        """
+        x = self.embedding(x) * math.sqrt(self.emb_dim)
+        x = self.positional_encoding(x)
+        x = self.dropout(x)
+
+        for layer in self.layers:
+            x = layer(x, key_pad_mask=key_pad_mask, mode=mode)
+
+        if mode == "pre-norm":
+            x = self.norm(x)
+        return x
+
+
+class Decoder(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        emb_dim: int,
+        hidden_dim: int,
+        n_heads: int,
+        n_layers: int,
+        bias: bool = True,
+        dropout: float = 0.1,
+        max_length: int = 5000,
+    ):
+        super().__init__()
+
+        self.emb_dim = emb_dim
+        self.embedding = nn.Embedding(vocab_size, emb_dim)
+        self.positional_encoding = PositionalEncoding(emb_dim, max_length=max_length)
+        self.dropout = nn.Dropout(p=dropout)
+        self.layers = nn.ModuleList(
+            [
+                DecoderLayer(emb_dim, hidden_dim, n_heads, bias, dropout)
+                for _ in range(n_layers)
+            ]
+        )
+        # pre-norm mode only : final layer normalization
+        self.norm = nn.LayerNorm(normalized_shape=emb_dim)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        encoder_output: torch.Tensor,
+        source_pad_mask: torch.Tensor,
+        target_pad_mask: torch.Tensor,
+        mode: str = "post-norm",
+    ):
+        """
+        Args:
+            x: input ids (batch_size, seq_len)
+            pad_mask: padding mask (batch_size, seq_len)
+        """
+        x = self.embedding(x) * math.sqrt(self.emb_dim)
+        x = self.positional_encoding(x)
+        x = self.dropout(x)
+
+        for layer in self.layers:
+            x = layer(x, encoder_output, source_pad_mask, target_pad_mask, mode=mode)
+
+        if mode == "pre-norm":
+            x = self.norm(x)
+
+        return x
