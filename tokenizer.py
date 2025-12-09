@@ -6,18 +6,17 @@ import numpy as np
 class BPETokenizer:
     def __init__(
         self,
-        min_frequency: int = 1,
+        vocab_size: int = 10000,
         special_tokens: list[str] = ["<pad>", "<unk>", "<sos>", "<eos>"],
     ):
-        self.min_frequency = min_frequency
+        self.vocab_size = vocab_size
         self.special_tokens = special_tokens
 
         # initialize vocabulary
         self.word2idx = {word: i for i, word in enumerate(self.special_tokens)}
         self.idx2word = {i: word for word, i in self.word2idx.items()}
 
-        # BPE merge dictionary (pair -> new_token)
-        self.vocab_size = len(self.word2idx)
+        # BPE merge dictionary
         self.merges = {}  # merge rules for encoding : pair -> new_token
         self.ranks = {}  # pair -> rank
 
@@ -33,75 +32,43 @@ class BPETokenizer:
             words = sentence.strip().split()
             word_counts.update(words)
 
-        # 2. 문자 단위 분리 + </w> (space) : tuple로 변환하여 딕셔너리 키로 사용
-        vocab = {
-            tuple(list(word.lower()) + ["<w/>"]): freq
-            for word, freq in word_counts.items()
-        }
-        return vocab
+        # 단어를 문자 리스트로 변환 (끝 문자 표시)
+        # vocab: { "word": ["c", "h", "a", "r", "s", "</w>"] }
+        vocab_list = {word: list(word) + ["</w>"] for word in word_counts}
+        return word_counts, vocab_list
 
-    def get_adjacent_pairs(
-        self, vocab: dict[tuple[str, ...], int]
-    ) -> collections.Counter:
+    def get_stats(self, vocab_list, word_counts):
         """
-        현재 어휘 집합에서 인접한 쌍의 빈도를 계산
+        초기 쌍 빈도수와 Inverted Index 생성
         """
-        pairs = collections.Counter()
-        for word_tuple, freq in vocab.items():
-            for i in range(len(word_tuple) - 1):
-                pairs[(word_tuple[i], word_tuple[i + 1])] += freq
-        return pairs
+        pairs = collections.defaultdict(int)
+        # inverted_index: pair -> {word_original_string, ...}
+        # 해당 쌍이 포함된 '단어(key)'들의 집합(Set)을 저장
+        inverted_index = collections.defaultdict(set)
 
-    def merge_pair(
-        self, best_pair: tuple[str, str], vocab: dict[tuple[str, ...], int]
-    ) -> dict[tuple[str, ...], int]:
-        """
-        Merge a pair of tokens in the vocabulary and return the updated vocabulary and the new token.
-        Example:
-        vocab = {'l o w </w>': 5, 'l o w e r </w>': 2}
-        best_pair = ('l', 'o')
-        new_vocab = {'lo w </w>': 5, 'lo w e r </w>': 2}
-        new_token = 'lo'
-        """
-        first, second = best_pair
-        new_token = first + second
-        new_vocab = {}
+        for word, symbols in vocab_list.items():
+            freq = word_counts[word]
+            for i in range(len(symbols) - 1):
+                pair = (symbols[i], symbols[i + 1])
+                pairs[pair] += freq
+                inverted_index[pair].add(word)
 
-        # vocab의 key(단어 튜플)를 순회하며 replace 수행
-        for word_tuple, freq in vocab.items():
-            new_word_tuple = []
-            i = 0
-            while i < len(word_tuple):
-                # 인접한 두 문자가 병합 대상과 일치하는지 확인
-                if (
-                    i < len(word_tuple) - 1
-                    and word_tuple[i] == first
-                    and word_tuple[i + 1] == second
-                ):
-                    new_word_tuple.append(new_token)
-                    i += 2
-                else:
-                    new_word_tuple.append(word_tuple[i])
-                    i += 1
+        return pairs, inverted_index
 
-            # 갱신된 튜플을 키로 사용하여 빈도수 유지
-            new_vocab[tuple(new_word_tuple)] = freq
+    def train(self, corpus: list[str]):
+        # 1. 초기화
+        word_counts, vocab_list = self.initialize(corpus)
 
-        return new_vocab, new_token
+        # 2. 초기 쌍 통계 및 역색인 생성 (최초 1회만 수행)
+        pairs, inverted_index = self.get_stats(vocab_list, word_counts)
 
-    def train(self, corpus: list[str]) -> tuple[dict[str, int], dict[int, str]]:
-        """
-        Train the BPE tokenizer on a given corpus and return the word2idx and idx2word dictionaries.
-        """
-        # 1. 초기화 (단어 튜플, 빈도수) 형태의 딕셔너리로 변환
-        vocab = self.initialize(corpus)
-        rank_count = 0
+        rank_counter = 0
 
-        while True:
-            # 2. 인접 쌍 빈도 계산 (vocab이 딕셔너리이므로 .items() 호출 가능)
-            pairs = self.get_adjacent_pairs(vocab)
+        # 3. 목표 vocab size 도달 시까지 반복
+        # (현재 단어장 크기 = 초기 특수토큰 수 + 병합된 횟수)
+        current_vocab_size = len(self.word2idx)
 
-            # 더 이상 병합할 쌍이 없으면 종료 (empty Counter는 False 취급)
+        while current_vocab_size < self.vocab_size:
             if not pairs:
                 break
 
@@ -109,29 +76,72 @@ class BPETokenizer:
             best_pair = max(pairs, key=pairs.get)
             freq = pairs[best_pair]
 
-            if freq < self.min_frequency:
-                print(
-                    f"Stop training: Best pair {best_pair} freq {freq} < min_freq {self.min_frequency}"
-                )
-                break
-
-            # 4. 병합 수행 (딕셔너리 -> 딕셔너리)
-            vocab, new_token = self.merge_pair(best_pair, vocab)
-
-            # 5. update the merge dictionary and vocab
+            # 4. 병합 정보 저장
+            new_token = best_pair[0] + best_pair[1]
             self.merges[best_pair] = new_token
-            self.ranks[best_pair] = rank_count
-            rank_count += 1
-            if new_token not in self.word2idx:
-                idx = len(self.word2idx)
-                self.word2idx[new_token] = idx
-                self.idx2word[idx] = new_token
+            self.ranks[best_pair] = rank_counter
 
+            if new_token not in self.word2idx:
+                self.word2idx[new_token] = len(self.word2idx)
+                self.idx2word[len(self.word2idx)] = new_token
+                current_vocab_size += 1
+
+            rank_counter += 1
             print(f"Merged: {best_pair} -> {new_token} (Freq: {freq})")
 
-        self.vocab_size = len(self.word2idx)
-        print(f"Training completed. Vocab size: {self.vocab_size}")
-        return self.word2idx, vocab
+            # === [Core Logic: Subtract -> Merge -> Add] ===
+
+            # 1. best_pair를 포함하는 단어들의 목록을 복사 (Set 순회 중 수정 방지)
+            words_to_update = list(inverted_index[best_pair])
+
+            # 2. 해당 단어들에 대해 반복
+            for word in words_to_update:
+                current_freq = word_counts[word]
+                current_symbols = vocab_list[word]
+
+                # [Step A: Subtract] 현재 상태의 모든 쌍 정보를 제거
+                # (단어 하나는 길어야 수십 글자이므로 전체를 지웠다 다시 쓰는 게 훨씬 안전하고 빠름)
+                for i in range(len(current_symbols) - 1):
+                    p = (current_symbols[i], current_symbols[i + 1])
+                    pairs[p] -= current_freq
+                    if pairs[p] == 0:
+                        del pairs[p]
+                    # 역색인에서도 제거 (안전하게 discard 사용)
+                    if p in inverted_index:
+                        inverted_index[p].discard(word)
+
+                # [Step B: Merge] 단어 리스트 내부 병합 수행 (replace)
+                new_symbols = []
+                i = 0
+                while i < len(current_symbols):
+                    if (
+                        i < len(current_symbols) - 1
+                        and (current_symbols[i], current_symbols[i + 1]) == best_pair
+                    ):
+                        new_symbols.append(new_token)
+                        i += 2
+                    else:
+                        new_symbols.append(current_symbols[i])
+                        i += 1
+
+                # vocab_list 업데이트
+                vocab_list[word] = new_symbols
+
+                # [Step C: Add] 새로운 상태의 모든 쌍 정보를 다시 등록
+                for i in range(len(new_symbols) - 1):
+                    p = (new_symbols[i], new_symbols[i + 1])
+                    pairs[p] += current_freq
+                    inverted_index[p].add(word)
+
+            # (참고) best_pair는 위 로직에 의해 자연스럽게 pairs와 inverted_index에서 빈도가 0이 되거나 제거됨
+            # 혹시 남아있는 쓰레기 값이 있다면 정리
+            if best_pair in pairs:
+                del pairs[best_pair]
+            if best_pair in inverted_index:
+                del inverted_index[best_pair]
+
+        print(f"Training completed. Final vocab size: {len(self.word2idx)}")
+        return self.word2idx
 
     def encode(self, text: str):
         encoded_ids = []
@@ -360,11 +370,10 @@ class Tokenizer:
 
 
 if __name__ == "__main__":
-    corpus = ["low lower newest widest"]
-    tokenizer = BPETokenizer()
-    word2idx, words = tokenizer.train(corpus)
+    corpus = ["low lower newest widest highest fastest"]
+    tokenizer = BPETokenizer(vocab_size=30)
+    word2idx = tokenizer.train(corpus)
     print(f"Word2Idx: {word2idx}")
-    print(f"Words: {words}")
-    encoded_ids, encoded_tokens = tokenizer.encode("low lower newest widest highest")
+    encoded_ids, encoded_tokens = tokenizer.encode("latest lowest")
     print(f"Encoded IDs: {encoded_ids}")
     print(f"Encoded Tokens: {encoded_tokens}")
