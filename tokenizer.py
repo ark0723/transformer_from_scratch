@@ -3,6 +3,188 @@ import collections
 import numpy as np
 
 
+class BPETokenizer:
+    def __init__(
+        self,
+        min_frequency: int = 1,
+        special_tokens: list[str] = ["<pad>", "<unk>", "<sos>", "<eos>"],
+    ):
+        self.min_frequency = min_frequency
+        self.special_tokens = special_tokens
+
+        # initialize vocabulary
+        self.word2idx = {word: i for i, word in enumerate(self.special_tokens)}
+        self.idx2word = {i: word for word, i in self.word2idx.items()}
+
+        # BPE merge dictionary (pair -> new_token)
+        self.vocab_size = len(self.word2idx)
+        self.merges = {}  # merge rules for encoding : pair -> new_token
+        self.ranks = {}  # pair -> rank
+
+    def initialize(self, corpus: list[str]) -> dict[tuple[str, ...], int]:
+        """
+        코퍼스를 (단어 튜플, 빈도수) 형태의 딕셔너리로 변환
+        Example: {'l o w </w>': 5, 'l o w e r </w>': 2}
+        """
+        # 1. 모든 단어를 분리하여 카운트
+        word_counts = collections.Counter()
+        for sentence in corpus:
+            # 2. 각 문장을 space 기준으로 단어로 분리하고 각 단어를 카운트
+            words = sentence.strip().split()
+            word_counts.update(words)
+
+        # 2. 문자 단위 분리 + </w> (space) : tuple로 변환하여 딕셔너리 키로 사용
+        vocab = {
+            tuple(list(word.lower()) + ["<w/>"]): freq
+            for word, freq in word_counts.items()
+        }
+        return vocab
+
+    def get_adjacent_pairs(
+        self, vocab: dict[tuple[str, ...], int]
+    ) -> collections.Counter:
+        """
+        현재 어휘 집합에서 인접한 쌍의 빈도를 계산
+        """
+        pairs = collections.Counter()
+        for word_tuple, freq in vocab.items():
+            for i in range(len(word_tuple) - 1):
+                pairs[(word_tuple[i], word_tuple[i + 1])] += freq
+        return pairs
+
+    def merge_pair(
+        self, best_pair: tuple[str, str], vocab: dict[tuple[str, ...], int]
+    ) -> dict[tuple[str, ...], int]:
+        """
+        Merge a pair of tokens in the vocabulary and return the updated vocabulary and the new token.
+        Example:
+        vocab = {'l o w </w>': 5, 'l o w e r </w>': 2}
+        best_pair = ('l', 'o')
+        new_vocab = {'lo w </w>': 5, 'lo w e r </w>': 2}
+        new_token = 'lo'
+        """
+        first, second = best_pair
+        new_token = first + second
+        new_vocab = {}
+
+        # vocab의 key(단어 튜플)를 순회하며 replace 수행
+        for word_tuple, freq in vocab.items():
+            new_word_tuple = []
+            i = 0
+            while i < len(word_tuple):
+                # 인접한 두 문자가 병합 대상과 일치하는지 확인
+                if (
+                    i < len(word_tuple) - 1
+                    and word_tuple[i] == first
+                    and word_tuple[i + 1] == second
+                ):
+                    new_word_tuple.append(new_token)
+                    i += 2
+                else:
+                    new_word_tuple.append(word_tuple[i])
+                    i += 1
+
+            # 갱신된 튜플을 키로 사용하여 빈도수 유지
+            new_vocab[tuple(new_word_tuple)] = freq
+
+        return new_vocab, new_token
+
+    def train(self, corpus: list[str]) -> tuple[dict[str, int], dict[int, str]]:
+        """
+        Train the BPE tokenizer on a given corpus and return the word2idx and idx2word dictionaries.
+        """
+        # 1. 초기화 (단어 튜플, 빈도수) 형태의 딕셔너리로 변환
+        vocab = self.initialize(corpus)
+        rank_count = 0
+
+        while True:
+            # 2. 인접 쌍 빈도 계산 (vocab이 딕셔너리이므로 .items() 호출 가능)
+            pairs = self.get_adjacent_pairs(vocab)
+
+            # 더 이상 병합할 쌍이 없으면 종료 (empty Counter는 False 취급)
+            if not pairs:
+                break
+
+            # 3. 가장 빈도가 높은 쌍 찾기
+            best_pair = max(pairs, key=pairs.get)
+            freq = pairs[best_pair]
+
+            if freq < self.min_frequency:
+                print(
+                    f"Stop training: Best pair {best_pair} freq {freq} < min_freq {self.min_frequency}"
+                )
+                break
+
+            # 4. 병합 수행 (딕셔너리 -> 딕셔너리)
+            vocab, new_token = self.merge_pair(best_pair, vocab)
+
+            # 5. update the merge dictionary and vocab
+            self.merges[best_pair] = new_token
+            self.ranks[best_pair] = rank_count
+            rank_count += 1
+            if new_token not in self.word2idx:
+                idx = len(self.word2idx)
+                self.word2idx[new_token] = idx
+                self.idx2word[idx] = new_token
+
+            print(f"Merged: {best_pair} -> {new_token} (Freq: {freq})")
+
+        self.vocab_size = len(self.word2idx)
+        print(f"Training completed. Vocab size: {self.vocab_size}")
+        return self.word2idx, vocab
+
+    def encode(self, text: str):
+        encoded_ids = []
+        encoded_tokens = []
+
+        for word in text.strip().split():
+            word_tokens = list(word) + ["</w>"]
+
+            while len(word_tokens) > 1:
+                # 현재 단어 내의 모든 인접 쌍 추출
+                pairs = [
+                    (word_tokens[i], word_tokens[i + 1])
+                    for i in range(len(word_tokens) - 1)
+                ]
+
+                # 2. merge rule에 있는 쌍만 필터링
+                candidate_pairs = [p for p in pairs if p in self.ranks]
+
+                if not candidate_pairs:
+                    break
+
+                best_pair = min(candidate_pairs, key=lambda x: self.ranks[x])
+
+                # 3. merge the best pair and replace the word tokens
+                new_word_tokens = []
+                i = 0
+
+                while i < len(word_tokens):
+                    if (
+                        i < len(word_tokens) - 1
+                        and (word_tokens[i], word_tokens[i + 1]) == best_pair
+                    ):
+                        # self.merges에서 해당 토큰 가져오기
+                        new_word_tokens.append(self.merges[best_pair])
+                        i += 2
+                    else:
+                        new_word_tokens.append(word_tokens[i])
+                        i += 1
+
+                word_tokens = new_word_tokens
+
+            # 결과 저장
+            encoded_tokens.extend(word_tokens)
+            # id 변환 (unknown token은 <unk>로 변환)
+            ids = [
+                self.word2idx.get(token, self.word2idx["<unk>"])
+                for token in word_tokens
+            ]
+            encoded_ids.extend(ids)
+
+        return encoded_ids, encoded_tokens
+
+
 class Tokenizer:
     """
     A simple Tokenizer class that handles vocabulary building,
@@ -178,32 +360,11 @@ class Tokenizer:
 
 
 if __name__ == "__main__":
-    corpus = [
-        "The cat sat on the mat.",
-        "I love natural language processing.",
-        "How are you doing today?",
-        "She sells seashells by the seashore.",
-        "Artificial intelligence is transforming the world.",
-        "Can you believe it's already July?",
-        "Let's meet at 5 p.m. in the cafe.",
-        "He didn’t know what to say.",
-        "The weather is nice and sunny.",
-        "Data science combines statistics and programming.",
-        "Despite the heavy rain and traffic, she arrived on time with a smile on her face.",
-    ]
-    tokenizer = Tokenizer()
-    tokenizer.build_vocab(corpus)
-
-    # 1. single encoding test
-    single_output = tokenizer("Deep learning is fun.", max_length=10)
-    print(
-        f"Single Input IDs: {single_output['input_ids']} / Single Attention Mask: {single_output['attention_mask']}"
-    )
-
-    # 2. batch encoding test
-    batch_input = ["The cat sat on the mat.", "I love natural language processing."]
-    batch_output = tokenizer(batch_input, max_length=6)
-    print(
-        f"Batch Input IDs: {batch_output['input_ids']} / Batch Attention Mask: {batch_output['attention_mask']}"
-    )
-    print(f"Batch Decoded: {tokenizer.decode(batch_output['input_ids'])}")
+    corpus = ["low lower newest widest"]
+    tokenizer = BPETokenizer()
+    word2idx, words = tokenizer.train(corpus)
+    print(f"Word2Idx: {word2idx}")
+    print(f"Words: {words}")
+    encoded_ids, encoded_tokens = tokenizer.encode("low lower newest widest highest")
+    print(f"Encoded IDs: {encoded_ids}")
+    print(f"Encoded Tokens: {encoded_tokens}")

@@ -402,7 +402,7 @@ class DecoderLayer(nn.Module):
         )
 
         # 2. Cross-Attention
-        # "내가 지금 번역(생성)하려는 단어가 원문(Source)의 어느 부분과 연관되어 있는가?"
+        # "내가 지금 번역(생성)하려는 단어가 원문(Source)의 어느 부분과 연관되어 있는가?" 
         self.cross_attn = MultiHeadAttention(
             emb_dim=emb_dim,
             n_heads=n_heads,
