@@ -16,14 +16,20 @@ class BPETokenizer:
         self.word2idx = {word: i for i, word in enumerate(self.special_tokens)}
         self.idx2word = {i: word for word, i in self.word2idx.items()}
 
+        # pre-save special token IDs for efficiency
+        self.pad_token_id = self.word2idx["<pad>"]
+        self.unk_token_id = self.word2idx["<unk>"]
+        self.sos_token_id = self.word2idx["<sos>"]
+        self.eos_token_id = self.word2idx["<eos>"]
+
         # BPE merge dictionary
         self.merges = {}  # merge rules for encoding : pair -> new_token
         self.ranks = {}  # pair -> rank
 
-    def initialize(self, corpus: list[str]) -> dict[tuple[str, ...], int]:
+    def initialize(self, corpus: list[str]) -> tuple[dict, dict]:
         """
-        코퍼스를 (단어 튜플, 빈도수) 형태의 딕셔너리로 변환
-        Example: {'l o w </w>': 5, 'l o w e r </w>': 2}
+        Converts corpus into word counts and initial vocab list.
+        Example: {'low': 5} -> vocab_list {'low': ['l', 'o', 'w', '</w>']}
         """
         # 1. 모든 단어를 분리하여 카운트
         word_counts = collections.Counter()
@@ -39,7 +45,7 @@ class BPETokenizer:
 
     def get_stats(self, vocab_list, word_counts):
         """
-        초기 쌍 빈도수와 Inverted Index 생성
+        Calculates pair frequencies and creates an inverted index.
         """
         pairs = collections.defaultdict(int)
         # inverted_index: pair -> {word_original_string, ...}
@@ -68,6 +74,19 @@ class BPETokenizer:
         # (현재 단어장 크기 = 초기 특수토큰 수 + 병합된 횟수)
         current_vocab_size = len(self.word2idx)
 
+        # add base characters to vocab first
+        # This ensures all single chars are known even if not merged
+        initial_chars = set()
+        for symbols in vocab_list.values():
+            initial_chars.update(symbols)
+
+        for char in sorted(list(initial_chars)):
+            if char not in self.word2idx:
+                new_id = len(self.word2idx)
+                self.word2idx[char] = new_id
+                self.idx2word[new_id] = char
+                current_vocab_size += 1
+
         while current_vocab_size < self.vocab_size:
             if not pairs:
                 break
@@ -82,12 +101,13 @@ class BPETokenizer:
             self.ranks[best_pair] = rank_counter
 
             if new_token not in self.word2idx:
-                self.word2idx[new_token] = len(self.word2idx)
-                self.idx2word[len(self.word2idx)] = new_token
+                new_id = len(self.word2idx)
+                self.word2idx[new_token] = new_id
+                self.idx2word[new_id] = new_token
                 current_vocab_size += 1
 
             rank_counter += 1
-            print(f"Merged: {best_pair} -> {new_token} (Freq: {freq})")
+            # print(f"Merged: {best_pair} -> {new_token} (Freq: {freq})")
 
             # === [Core Logic: Subtract -> Merge -> Add] ===
 
@@ -143,10 +163,14 @@ class BPETokenizer:
         print(f"Training completed. Final vocab size: {len(self.word2idx)}")
         return self.word2idx
 
-    def encode(self, text: str):
+    def encode(self, text: str, add_sos: bool = False, add_eos: bool = False):
+        """
+        Encodes a single string into a list of integers.
+        Added add_sos/add_eos args for compatibility with Seq2SeqCollator.
+        """
         encoded_ids = []
-        encoded_tokens = []
 
+        # Split text into words to handle BPE per word
         for word in text.strip().split():
             word_tokens = list(word) + ["</w>"]
 
@@ -183,16 +207,83 @@ class BPETokenizer:
 
                 word_tokens = new_word_tokens
 
-            # 결과 저장
-            encoded_tokens.extend(word_tokens)
-            # id 변환 (unknown token은 <unk>로 변환)
-            ids = [
-                self.word2idx.get(token, self.word2idx["<unk>"])
-                for token in word_tokens
-            ]
+            # Convert final tokens to IDs
+            # If a subword/character is unknown (not in vocab), map to <unk>
+            ids = [self.word2idx.get(token, self.unk_token_id) for token in word_tokens]
             encoded_ids.extend(ids)
 
-        return encoded_ids, encoded_tokens
+        if add_sos:
+            encoded_ids = [self.sos_token_id] + encoded_ids
+        if add_eos:
+            encoded_ids = encoded_ids + [self.eos_token_id]
+
+        return encoded_ids
+
+    def decode(
+        self,
+        indices: list[int] | list[list[int]] | np.ndarray,
+        skip_special_tokens: bool = False,
+    ) -> list[str] | str:
+        """
+        Decodes a list of IDs back to a string.
+        Handles BPE specific logic (removing </w>).
+        """
+
+        if isinstance(indices, np.ndarray):
+            indices = indices.tolist()
+        if isinstance(indices[0], list):
+            return [self.decode(seq, skip_special_tokens) for seq in indices]
+
+        tokens = []
+        for idx in indices:
+            token = self.idx2word.get(idx, "<unk>")
+            if skip_special_tokens and token in self.special_tokens:
+                continue
+            tokens.append(token)
+
+        # join tokens to from the rough string
+        text = "".join(tokens)
+
+        # Post-processing for BPE: replace </w> with space
+        # </w> indicates end of word, so we replace it with space
+        text = text.replace("</w>", " ").strip()
+
+        return text
+
+    def __call__(
+        self,
+        text: str | list[str],
+        max_length: int | None = None,
+        add_sos: bool = False,
+        add_eos: bool = False,
+    ) -> dict[str, np.ndarray]:
+        """
+        Batch encoding interface for DataLoader
+        """
+        if isinstance(text, str):
+            text = [text]
+
+        # 1. Encode all sentences
+        batch_ids = [
+            self.encode(sentence, add_sos=add_sos, add_eos=add_eos) for sentence in text
+        ]
+
+        # 2. Padding
+        batch_size = len(batch_ids)
+
+        # if max_length is not provided, use the longest sequence in the batch
+        if max_length is None:
+            max_length = max(len(ids) for ids in batch_ids)
+
+        input_ids = np.full((batch_size, max_length), self.pad_token_id, dtype=np.int32)
+        attention_mask = np.zeros((batch_size, max_length), dtype=np.int32)
+
+        for i, ids in enumerate(batch_ids):
+            length = min(len(ids), max_length)
+            input_ids[i, :length] = ids[:length]
+            attention_mask[i, :length] = 1
+
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
 class Tokenizer:
@@ -371,9 +462,22 @@ class Tokenizer:
 
 if __name__ == "__main__":
     corpus = ["low lower newest widest highest fastest"]
-    tokenizer = BPETokenizer(vocab_size=30)
+    tokenizer = BPETokenizer(vocab_size=50)
     word2idx = tokenizer.train(corpus)
-    print(f"Word2Idx: {word2idx}")
-    encoded_ids, encoded_tokens = tokenizer.encode("latest lowest")
+
+    print("\n--- Encoding Test ---")
+    test_str = "lowest highest"
+    encoded_ids = tokenizer.encode(test_str, add_sos=True, add_eos=True)
+    print(f"Input: '{test_str}'")
     print(f"Encoded IDs: {encoded_ids}")
-    print(f"Encoded Tokens: {encoded_tokens}")
+
+    print("\n--- Decoding Test ---")
+    decoded_str = tokenizer.decode(encoded_ids, skip_special_tokens=True)
+    print(f"Decoded: '{decoded_str}'")
+
+    print("\n--- Batch Test (__call__) ---")
+    batch_input = ["low lower", "widest"]
+    output = tokenizer(batch_input, max_length=10, add_sos=True)
+    print("Batch Input:", batch_input)
+    print("Input IDs:\n", output["input_ids"])
+    print("Attention Mask:\n", output["attention_mask"])
